@@ -25,6 +25,8 @@ import argparse
 import numpy as np
 from datetime import datetime, timedelta
 import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 import boto3
 from botocore import UNSIGNED
@@ -465,29 +467,124 @@ def _satellite_for(dt):
     return None
 
 
-def generate_timestamps(start_time=None):
+def generate_timestamps(start_time=None, end_time=None):
     """Yield (datetime, satellite) every 30 min across the full H8+H9 range."""
-    if start_time:
-        t = datetime.strptime(start_time, "%Y%m%d%H%M")
-    else:
-        t = HIMAWARI8_START
-    while t <= HIMAWARI8_END:
+    t = datetime.strptime(start_time, "%Y%m%d%H%M") if start_time else HIMAWARI8_START
+    end = datetime.strptime(end_time, "%Y%m%d%H%M") if end_time else HIMAWARI9_END
+    while t <= HIMAWARI8_END and t <= end:
         yield t, "H8"
         t += timedelta(minutes=60)
     t = HIMAWARI9_START
-    while t <= HIMAWARI9_END:
+    while t <= end:
         yield t, "H9"
         t += timedelta(minutes=60)
 
 
 # ===================================================================
+# Multithreaded year-by-year download
+# ===================================================================
+_progress_lock = threading.Lock()
+_global_success = 0
+
+
+def _year_timestamps(year):
+    """
+    Yield (datetime, satellite) for every 60-min slot in *year* across
+    the valid Himawari-8 / Himawari-9 windows.
+    """
+    y_start = datetime(year, 1, 1, 0, 0)
+    y_end = datetime(year, 12, 31, 23, 30)
+
+    if year < 2020 or year > 2025:
+        return
+
+    # Clip to each satellite's active window
+    if year <= 2022:
+        t = max(y_start, HIMAWARI8_START)
+        stop = min(y_end, HIMAWARI8_END)
+        while t <= stop:
+            yield t, "H8"
+            t += timedelta(minutes=60)
+
+    if year >= 2022:
+        t = max(y_start, HIMAWARI9_START)
+        stop = min(y_end, HIMAWARI9_END)
+        while t <= stop:
+            yield t, "H9"
+            t += timedelta(minutes=60)
+
+
+def _download_year(year, output_dir):
+    """
+    Worker: download and process all timestamps for a single year.
+    Prints progress with the year label.
+    """
+    global _global_success
+    local_success = 0
+    for dt, sat in _year_timestamps(year):
+        try:
+            if process_timestamp(dt, sat, output_dir):
+                local_success += 1
+        except KeyboardInterrupt:
+            return local_success
+        except Exception:
+            pass
+
+    with _progress_lock:
+        _global_success += local_success
+    print(f"  [year {year}] finished — {local_success} timestamps saved")
+    return local_success
+
+
+def main_threaded(years, output_dir="data", num_workers=None):
+    """
+    Download multiple years in parallel using a thread pool.
+
+    Parameters
+    ----------
+    years : list[int]
+        Years to download (e.g., [2021, 2022, 2023, 2024, 2025]).
+    output_dir : str
+    num_workers : int or None
+        Number of threads (default: len(years)).
+    """
+    years = sorted(set(years))
+    num_workers = num_workers or len(years)
+    print(f"Starting {num_workers}-thread download for years {years}")
+    print(f"Output directory: {os.path.abspath(output_dir)}")
+
+    global _global_success
+    _global_success = 0
+
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = {
+            executor.submit(_download_year, y, output_dir): y
+            for y in years
+        }
+        try:
+            for f in as_completed(futures):
+                y = futures[f]
+                try:
+                    f.result()
+                except Exception as e:
+                    print(f"  [year {y}] thread crashed: {e}")
+        except KeyboardInterrupt:
+            print("\nInterrupted — waiting for in-flight downloads to finish...")
+            executor.shutdown(wait=True, cancel_futures=True)
+            print(f"Partial results saved ({_global_success} timestamps).")
+            return
+
+    print(f"\nDone.  {_global_success} total timestamps processed.")
+
+
+# ===================================================================
 # Main entry-points
 # ===================================================================
-def main_full(output_dir="data", start_time=None):
+def main_full(output_dir="data", start_time=None, end_time=None):
     """Full pipeline — years of 60-min data.  Runs until interrupted or done."""
     print("Himawari-8/9 full pipeline — press Ctrl+C to stop")
     success = 0
-    for dt, sat in generate_timestamps(start_time=start_time):
+    for dt, sat in generate_timestamps(start_time=start_time, end_time=end_time):
         try:
             if process_timestamp(dt, sat, output_dir):
                 success += 1
@@ -550,7 +647,19 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--begin_time", type=str, default=None,
-        help="Manually assign the starting time of the download, can be used for resumation"
+        help="Manually assign the starting time of the download"
+    )
+    parser.add_argument(
+        "--end_time", type=str, default=None,
+        help="Manually assign the ending time of the download"
+    )
+    parser.add_argument(
+        "--years", type=str, default=None,
+        help="Comma-separated years for multi-threaded download (e.g. '2021,2022,2023,2024,2025')"
+    )
+    parser.add_argument(
+        "--workers", type=int, default=None,
+        help="Number of parallel threads (default: number of years)"
     )
     args = parser.parse_args()
 
@@ -558,5 +667,8 @@ if __name__ == "__main__":
         main_test(args.out)
     elif args.date:
         main_date(args.date, args.out)
+    elif args.years:
+        years = [int(y.strip()) for y in args.years.split(",")]
+        main_threaded(years, args.out, args.workers)
     else:
-        main_full(args.out)
+        main_full(args.out, args.begin_time, args.end_time)
