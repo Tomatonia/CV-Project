@@ -256,22 +256,30 @@ def compute_satellite_angles(lat, lon):
 # ===================================================================
 # Image helpers
 # ===================================================================
-def _to_uint8(data):
+def _to_uint8(data, vmin=None, vmax=None):
     """Min-max normalise 2-D array → [0, 255] uint8, with NaN guard."""
     finite = data[np.isfinite(data)]
     if finite.size == 0:
         return np.zeros_like(data, dtype=np.uint8)
-    vmin, vmax = finite.min(), finite.max()
-    if vmax == vmin:
+    v_min = vmin if vmin else finite.min()
+    v_max = vmax if vmax else finite.max()
+    if v_max == v_min:
         return np.zeros_like(data, dtype=np.uint8)
-    norm = (data - vmin) / (vmax - vmin) * 255.0
+    # data = np.clip(data, v_min, v_max)
+    norm = (data - v_min) / (v_max - v_min) * 255.0
     norm = np.nan_to_num(norm, nan=0.0, posinf=255.0, neginf=0.0)
     return np.clip(norm, 0, 255).astype(np.uint8)
 
 
-def rescale_to_512(data):
+def rescale_to_512(data, type: str):
     """Resize a 2-D array → (512, 512) uint8 via PIL LANCZOS."""
-    img = Image.fromarray(_to_uint8(data))
+    if type == 'ir':
+        img = Image.fromarray(_to_uint8(data, vmin=173.15, vmax=323.15)) # IR-BW scale brightness temperature [173.15, 323.15]
+    elif type == 'vis':
+        # print(f"VIS data range: min:{data.min():06f}, max:{data.max():06f}")
+        img = Image.fromarray(_to_uint8(data, vmin=0, vmax=125)) # reflectance [0, 100+]
+    else:
+        raise ValueError(f"Unknown data category: {type}")
     img = img.resize((TARGET_SIZE, TARGET_SIZE), Image.LANCZOS)
     return np.array(img, dtype=np.uint8)
 
@@ -322,10 +330,9 @@ def compute_angles_from_data(data_array, day_only=True):
     ) / 2
 
     sol_zen, sol_az = solar_position_noaa(mid_time, lat, lon)
-    sat_zen, sat_az = compute_satellite_angles(lat, lon)
-
     if day_only and sol_zen.max() > 90.0:
         return None
+    sat_zen, sat_az = compute_satellite_angles(lat, lon)
 
     angle_maps = []
     for arr in [sol_zen, sol_az, sat_zen, sat_az]:
@@ -336,7 +343,7 @@ def compute_angles_from_data(data_array, day_only=True):
     return np.stack(angle_maps, axis=0)  # (4, 512, 512)
 
 
-def process_timestamp(date_time, satellite, output_dir="data", save_jpg=False):
+def process_timestamp(date_time, satellite, output_dir="data", save_jpg=False, save_angles=True):
     """
     Download + process all bands for one UTC timestamp.
 
@@ -378,29 +385,31 @@ def process_timestamp(date_time, satellite, output_dir="data", save_jpg=False):
             if angles_512 is None: # not during daytime
                 _cleanup(ir_files)
                 return False
+            
             # save angles
-            ang_dir = os.path.join(output_dir, "angles")
-            os.makedirs(ang_dir, exist_ok=True)
-            np.save(os.path.join(ang_dir, f"{sat_lower}_angles_{ts_fmt}.npy"), angles_512)
+            if save_angles:
+                ang_dir = os.path.join(output_dir, "angles")
+                os.makedirs(ang_dir, exist_ok=True)
+                np.save(os.path.join(ang_dir, f"{sat_lower}_angles_{ts_fmt}.npy"), angles_512)
 
-            # save angle JPGs (zenith: 0°→-1, 90°→1  |  azimuth: -180°→-1, 180°→1)
-            if save_jpg:
-                for i, name in enumerate(["sol_zen", "sol_az", "sat_zen", "sat_az"]):
-                    arr = angles_512[i]
-                    if name == "sol_az" or name == "sat_az":
-                        arr = np.where(arr > 180, arr - 360, arr)  # [0,360] → [-180,180]
-                        norm = arr / 180.0                           # [-1, 1]
-                    else:
-                        norm = 2.0 * arr / 90.0 - 1.0               # [0,90] → [-1, 1]
-                    # normalize = plt.Normalize(vmin=-1, vmax=1)
-                    # disp = normalize(norm)
-                    # disp = ((norm + 1.0) / 2.0 * 255.0).clip(0, 255).astype(np.uint8)
-                    plt.imsave(
-                        os.path.join(jpg_dir, f"himawari-{sat_lower}-{name}-{ts_fmt}.jpg"),
-                        norm, cmap="inferno", vmin=-1, vmax=1
-                    )
+                # save angle JPGs (zenith: 0°→-1, 90°→1  |  azimuth: -180°→-1, 180°→1)
+                if save_jpg:
+                    for i, name in enumerate(["sol_zen", "sol_az", "sat_zen", "sat_az"]):
+                        arr = angles_512[i]
+                        if name == "sol_az" or name == "sat_az":
+                            arr = np.where(arr > 180, arr - 360, arr)  # [0,360] → [-180,180]
+                            norm = arr / 180.0                           # [-1, 1]
+                        else:
+                            norm = 2.0 * arr / 90.0 - 1.0               # [0,90] → [-1, 1]
+                        # normalize = plt.Normalize(vmin=-1, vmax=1)
+                        # disp = normalize(norm)
+                        # disp = ((norm + 1.0) / 2.0 * 255.0).clip(0, 255).astype(np.uint8)
+                        plt.imsave(
+                            os.path.join(jpg_dir, f"himawari-{sat_lower}-{name}-{ts_fmt}.jpg"),
+                            norm, cmap="inferno", vmin=-1, vmax=1
+                        )
         
-        ir_512 = rescale_to_512(data.values)
+        ir_512 = rescale_to_512(data.values, 'ir')
         ir_channels.append(ir_512)
 
         # JPG
@@ -410,8 +419,7 @@ def process_timestamp(date_time, satellite, output_dir="data", save_jpg=False):
                 ir_512, cmap="gray_r",
             )
 
-    ir_stack = np.stack(ir_channels, axis=0).astype(np.uint8)  # (7, 512, 512)
-
+    ir_stack = np.stack(ir_channels, axis=0).astype(np.uint8)  # (3, 512, 512)
     ir_dir = os.path.join(output_dir, "ir")
     os.makedirs(ir_dir, exist_ok=True)
     np.save(os.path.join(ir_dir, f"{sat_lower}_ir_{ts_fmt}.npy"), ir_stack)
@@ -427,7 +435,7 @@ def process_timestamp(date_time, satellite, output_dir="data", save_jpg=False):
         _cleanup([vis_file])
         return False
 
-    vis_512 = rescale_to_512(vis_data.values)
+    vis_512 = rescale_to_512(vis_data.values, 'vis')
 
     # save VIS
     vis_dir = os.path.join(output_dir, "vis")
@@ -514,7 +522,7 @@ def _year_timestamps(year):
             t += timedelta(minutes=60)
 
 
-def _download_year(year, output_dir):
+def _download_year(year, output_dir, save_angles=True):
     """
     Worker: download and process all timestamps for a single year.
     Prints progress with the year label.
@@ -523,7 +531,7 @@ def _download_year(year, output_dir):
     local_success = 0
     for dt, sat in _year_timestamps(year):
         try:
-            if process_timestamp(dt, sat, output_dir):
+            if process_timestamp(dt, sat, output_dir, save_angles=save_angles):
                 local_success += 1
         except KeyboardInterrupt:
             return local_success
@@ -536,7 +544,7 @@ def _download_year(year, output_dir):
     return local_success
 
 
-def main_threaded(years, output_dir="data", num_workers=None):
+def main_threaded(years, output_dir="data", num_workers=None, save_angles=True):
     """
     Download multiple years in parallel using a thread pool.
 
@@ -558,7 +566,7 @@ def main_threaded(years, output_dir="data", num_workers=None):
 
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
         futures = {
-            executor.submit(_download_year, y, output_dir): y
+            executor.submit(_download_year, y, output_dir, save_angles): y
             for y in years
         }
         try:
@@ -623,7 +631,7 @@ def main_date(date_str, output_dir="data"):
     sat = _satellite_for(dt)
     if sat is None:
         sat = "H9" if dt >= HIMAWARI9_START else "H8"
-    process_timestamp(dt, sat, output_dir, save_jpg=False)
+    process_timestamp(dt, sat, output_dir, save_jpg=True)
 
 
 # ===================================================================
@@ -669,6 +677,6 @@ if __name__ == "__main__":
         main_date(args.date, args.out)
     elif args.years:
         years = [int(y.strip()) for y in args.years.split(",")]
-        main_threaded(years, args.out, args.workers)
+        main_threaded(years, args.out, args.workers, save_angles=False)
     else:
         main_full(args.out, args.begin_time, args.end_time)
