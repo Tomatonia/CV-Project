@@ -191,8 +191,10 @@ def main():
             with torch.autocast(device_type="cuda", enabled=use_amp):
                 recon, mu, logvar = vae(x)
                 real_pred = disc(x)
-                fake_pred = disc(recon.detach()) # only used for updating discriminator
-                d_loss = hinge_loss_d(real_pred, fake_pred)
+                fake_pred = disc(recon.detach())
+            
+            # Keep losses out for stability
+            d_loss = hinge_loss_d(real_pred.float(), fake_pred.float()) # only used for updating discriminator
 
             # Give warning if loss is NaN
             if not torch.isfinite(d_loss):
@@ -211,14 +213,12 @@ def main():
             # Generator (VAE)
             # ============================================================
             _requires_grad(disc, False)
-
             with torch.autocast(device_type="cuda", enabled=use_amp):
                 fake_g = disc(recon) # for the generator
-                adv = hinge_loss_g(fake_g)
-                l1 = F.l1_loss(recon, x)
-                ssim = ssim_loss(recon, x) if args.ssim_weight > 0 else torch.tensor(0.0, device=device)
-            
-            # Keep KL and LPIPS loss at float32 (safer)
+
+            adv = hinge_loss_g(fake_g.float())
+            l1 = F.l1_loss(recon.float(), x.float())
+            ssim = ssim_loss(recon.float(), x.float()) if args.ssim_weight > 0 else torch.tensor(0.0, device=device)
             kld = kl_loss(mu.float(), logvar.float())
             if lpips_fn is not None and (
                 args.lpips_every <= 0 or (step + 1) % args.lpips_every == 0
