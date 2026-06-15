@@ -61,7 +61,7 @@ class VAEEncoder(nn.Module):
     def forward(self, x):
         h = self.in_conv(x)
         for layer in self.enc_block0:
-            h = checkpoint_resblock(layer, h, self.use_checkpoint) # Only checkpoint the biggest block
+            h = checkpoint_resblock(layer, h, False)
 
         h = self.down0(h)
         for layer in self.enc_block1:
@@ -136,7 +136,7 @@ class VAEDecoder(nn.Module):
 
         h = self.up1(h)
         for layer in self.dec_block0:
-            h = checkpoint_resblock(layer, h, self.use_checkpoint) # Only checkpoint the biggest block
+            h = checkpoint_resblock(layer, h, False)
 
         h = self.out_norm(h)
         h = F.silu(h)
