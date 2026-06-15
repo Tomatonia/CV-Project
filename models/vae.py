@@ -61,7 +61,7 @@ class VAEEncoder(nn.Module):
     def forward(self, x):
         h = self.in_conv(x)
         for layer in self.enc_block0:
-            h = checkpoint_resblock(layer, h, self.use_checkpoint)
+            h = checkpoint_resblock(layer, h, self.use_checkpoint) # Only checkpoint the biggest block
 
         h = self.down0(h)
         for layer in self.enc_block1:
@@ -136,7 +136,7 @@ class VAEDecoder(nn.Module):
 
         h = self.up1(h)
         for layer in self.dec_block0:
-            h = checkpoint_resblock(layer, h, self.use_checkpoint)
+            h = checkpoint_resblock(layer, h, self.use_checkpoint) # Only checkpoint the biggest block
 
         h = self.out_norm(h)
         h = F.silu(h)
@@ -210,3 +210,53 @@ def hinge_loss_d(real_pred, fake_pred):
 def hinge_loss_g(fake_pred):
     """Generator hinge loss: G wants D(fake) as high as possible."""
     return -fake_pred.mean()
+
+
+def ssim_loss(x, y, window_size=11, sigma=1.5):
+    """
+    Differentiable 1 - SSIM, averaged over batch and spatial dims.
+
+    Compares local patch statistics (mean, variance, covariance) through
+    a Gaussian window — penalises structural differences like blurred
+    cloud edges that L1 alone would tolerate.
+
+    Args:
+        x, y: (B, C, H, W) tensors in [-1, 1].
+        window_size: Gaussian kernel size (11 = standard).
+        sigma: Gaussian kernel σ.
+
+    Returns:
+        scalar: 1 - mean SSIM across channels and spatial positions.
+    """
+    C1 = 0.01 ** 2   # luminance stabiliser  (K1·L)²,  L = dynamic range 2)
+    C2 = 0.03 ** 2   # contrast stabiliser    (K2·L)²
+
+    # Gaussian window
+    coords = torch.arange(window_size, dtype=x.dtype, device=x.device)
+    coords -= (window_size - 1) / 2
+    g = torch.exp(-0.5 * (coords / sigma) ** 2)
+    g /= g.sum()
+    window = g.unsqueeze(1) * g.unsqueeze(0)  # (W, W)
+    window = window.view(1, 1, window_size, window_size).expand(x.size(1), 1, -1, -1)
+
+    # Channel-wise conv2d with Gaussian kernel — cast input to match window
+    def _ssim_conv(t):
+        return F.conv2d(
+            t.float(), window.to(device=t.device, dtype=t.dtype),
+            padding=window_size // 2, groups=t.size(1),
+        )
+
+    mu_x = _ssim_conv(x)
+    mu_y = _ssim_conv(y)
+    mu_xx = mu_x ** 2
+    mu_yy = mu_y ** 2
+    mu_xy = mu_x * mu_y
+
+    sigma_x = _ssim_conv(x ** 2) - mu_xx
+    sigma_y = _ssim_conv(y ** 2) - mu_yy
+    sigma_xy = _ssim_conv(x * y) - mu_xy
+
+    ssim_map = ((2 * mu_xy + C1) * (2 * sigma_xy + C2)) / (
+        (mu_xx + mu_yy + C1) * (sigma_x + sigma_y + C2)
+    )
+    return 1.0 - ssim_map.mean()

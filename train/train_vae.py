@@ -20,7 +20,7 @@ from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models.vae import VAE, kl_loss, hinge_loss_d, hinge_loss_g
+from models.vae import VAE, kl_loss, hinge_loss_d, hinge_loss_g, ssim_loss
 from models.discriminator import PatchGANDiscriminator
 from train.dataset import VisDataset
 
@@ -87,8 +87,11 @@ def main():
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--z_dim", type=int, default=4)
+    parser.add_argument("--ssim_weight", type=float, default=1.0,
+                        help="Weight for (1-SSIM) term (0 = L1 only)")
     parser.add_argument("--lambda_perc", type=float, default=1.0)
-    parser.add_argument("--lpips_every", type=int, default=0,
+    parser.add_argument("--use_lpips", action="store_true") # enable LPIPS perceptual loss, default disabled since SSIM loss is added
+    parser.add_argument("--lpips_every", type=int, default=10,
                         help="Compute LPIPS every N batches (0 = every batch)")
     parser.add_argument("--lambda_adv", type=float, default=0.5)
     parser.add_argument("--lambda_kl", type=float, default=5e-4)
@@ -117,7 +120,7 @@ def main():
     print(f"Device: {device}  |  AMP: {use_amp}  |  Logs: {args.log_dir}")
 
     # ---- LPIPS ----
-    lpips_fn = _try_load_lpips()
+    lpips_fn = _try_load_lpips() if args.use_lpips else None
     if lpips_fn is not None:
         lpips_fn = lpips_fn.to(device)
         for p in lpips_fn.parameters():
@@ -140,6 +143,7 @@ def main():
     # ---- Models ----
     vae = VAE(in_channels=1, out_channels=1, z_dim=args.z_dim).to(device)
     disc = PatchGANDiscriminator(in_channels=1).to(device)
+    # torch.compile() the models to accelerate
     if device.type == "cuda":
         vae = torch.compile(vae, mode="default")
         disc = torch.compile(disc, mode="default")
@@ -152,6 +156,7 @@ def main():
 
     if args.resume:
         ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        # May need to strip the '_orig_mod.' prefix of the keys
         vae.load_state_dict(ckpt["vae"])
         disc.load_state_dict(ckpt["disc"])
         opt_g.load_state_dict(ckpt["opt_g"])
@@ -167,26 +172,35 @@ def main():
 
         vae.train()
         disc.train()
-        g_loss_sum = d_loss_sum = rec_sum = kl_sum = 0.0
+        g_loss_sum = d_loss_sum = rec_sum = kl_sum = ssim_sum =  0.0
         batches = 0
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch:3d}/{args.epochs}", unit="batch")
         for step, x in enumerate(pbar):
             x = x.to(device)
+            if step % args.grad_accum == 0:
+                opt_d.zero_grad()
+                opt_g.zero_grad()
 
             # ============================================================
             # Discriminator
             # ============================================================
             _requires_grad(disc, True)
-            opt_d.zero_grad()
 
+            # Mixed precision in forward pass
             with torch.autocast(device_type="cuda", enabled=use_amp):
-                with torch.no_grad():
-                    recon, _, _ = vae(x)
+                recon, mu, logvar = vae(x)
                 real_pred = disc(x)
-                fake_pred = disc(recon.detach())
+                fake_pred = disc(recon.detach()) # only used for updating discriminator
+                d_loss = hinge_loss_d(real_pred, fake_pred)
 
-            d_loss = hinge_loss_d(real_pred, fake_pred)
+            # Give warning if loss is NaN
+            if not torch.isfinite(d_loss):
+                opt_d.zero_grad()
+                opt_g.zero_grad()
+                tqdm.write(f"  [WARN] NaN D loss at epoch {epoch} step {step} — skipping batch")
+                continue
+
             if scaler:
                 scaler.scale(d_loss).backward()
             else:
@@ -197,23 +211,29 @@ def main():
             # Generator (VAE)
             # ============================================================
             _requires_grad(disc, False)
-            opt_g.zero_grad()
 
             with torch.autocast(device_type="cuda", enabled=use_amp):
-                recon, mu, logvar = vae(x)
-
-            l1 = F.l1_loss(recon, x)
+                fake_g = disc(recon) # for the generator
+                adv = hinge_loss_g(fake_g)
+                l1 = F.l1_loss(recon, x)
+                ssim = ssim_loss(recon, x) if args.ssim_weight > 0 else torch.tensor(0.0, device=device)
+            
+            # Keep KL and LPIPS loss at float32 (safer)
+            kld = kl_loss(mu.float(), logvar.float())
             if lpips_fn is not None and (
                 args.lpips_every <= 0 or (step + 1) % args.lpips_every == 0
             ):
-                perc = lpips_fn(recon.repeat(1, 3, 1, 1), x.repeat(1, 3, 1, 1)).mean()
+                perc = lpips_fn(recon.repeat(1, 3, 1, 1).float(), x.repeat(1, 3, 1, 1).float()).mean()
             else:
                 perc = torch.tensor(0.0, device=device)
-            with torch.autocast(device_type="cuda", enabled=use_amp):
-                adv = hinge_loss_g(disc(recon))
-            kld = kl_loss(mu, logvar)
+            
+            g_loss = l1 + args.ssim_weight * ssim + args.lambda_perc * perc + args.lambda_adv * adv + kl_weight * kld
 
-            g_loss = l1 + args.lambda_perc * perc + args.lambda_adv * adv + kl_weight * kld
+            if not torch.isfinite(g_loss):
+                opt_d.zero_grad()
+                opt_g.zero_grad()
+                tqdm.write(f"  [WARN] NaN G loss at epoch {epoch} step {step} — skipping batch")
+                continue
 
             if scaler:
                 scaler.scale(g_loss).backward()
@@ -222,7 +242,9 @@ def main():
             g_loss_sum += g_loss.item()
             rec_sum += l1.item()
             kl_sum += kld.item()
+            ssim_sum += ssim.item()
 
+            # Optimizer steps
             if (step + 1) % args.grad_accum == 0 or (step + 1) == len(train_loader):
                 if scaler:
                     scaler.unscale_(opt_d)
@@ -237,36 +259,42 @@ def main():
                     nn.utils.clip_grad_norm_(vae.parameters(), args.clip_grad)
                     opt_d.step()
                     opt_g.step()
-                opt_d.zero_grad()
-                opt_g.zero_grad()
+                # zeo_grad() no longer needed since they are moved to the beginning of each accum cycle
+                # opt_d.zero_grad()
+                # opt_g.zero_grad()
                 ema.update(vae)
 
             batches += 1
             pbar.set_postfix(G=f"{g_loss_sum / batches:.3f}", D=f"{d_loss_sum / batches:.3f}",
-                             L1=f"{rec_sum / batches:.3f}", KL=f"{kl_sum / batches:.3f}")
+                             L1=f"{rec_sum / batches:.3f}", KL=f"{kl_sum / batches:.3f}",
+                             SSIM=f"{ssim_sum / batches:.3f}")
 
         n = max(batches, 1)
         writer.add_scalar("train/G_loss", g_loss_sum / n, epoch)
         writer.add_scalar("train/D_loss", d_loss_sum / n, epoch)
         writer.add_scalar("train/L1", rec_sum / n, epoch)
         writer.add_scalar("train/KL", kl_sum / n, epoch)
+        writer.add_scalar("train/SSIM", ssim_sum / n, epoch)
 
         # ---- Validation ----
         if (epoch + 1) % args.val_every == 0:
             ema.apply(vae)
             vae.eval()
-            val_l1 = val_kl = 0.0
+            val_l1 = val_kl = val_ssim = 0.0
             with torch.no_grad():
                 for x_val in tqdm(val_loader, desc="  Val", unit="batch", leave=False):
                     x_val = x_val.to(device)
                     recon, mu, logvar = vae(x_val)
                     val_l1 += F.l1_loss(recon, x_val).item()
                     val_kl += kl_loss(mu, logvar).item()
+                    val_ssim += ssim_loss(recon.float(), x_val.float())
             val_l1_avg = val_l1 / len(val_loader)
             val_kl_avg = val_kl / len(val_loader)
-            print(f"  Val L1={val_l1_avg:.4f}  KL={val_kl_avg:.6f}")
+            val_ssim_avg = val_ssim / len(val_loader)
+            print(f"  Val L1={val_l1_avg:.4f}  SSIM={val_ssim_avg:.4f}  KL={val_kl_avg:.6f}")
             writer.add_scalar("val/L1", val_l1_avg, epoch)
             writer.add_scalar("val/KL", val_kl_avg, epoch)
+            writer.add_scalar("val/SSIM", val_ssim_avg, epoch)
             ema.restore(vae)
             vae.train()
 
