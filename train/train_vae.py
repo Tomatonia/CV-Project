@@ -156,7 +156,8 @@ def main():
 
     if args.resume:
         ckpt = torch.load(args.resume, map_location=device, weights_only=False)
-        # May need to strip the '_orig_mod.' prefix of the keys
+        # No need to strip the '_orig_mod.' prefix of the keys
+        # clean = lambda dict: {k.replace('_orig_mod.', ''): v for k, v in dict.items()}
         vae.load_state_dict(ckpt["vae"])
         disc.load_state_dict(ckpt["disc"])
         opt_g.load_state_dict(ckpt["opt_g"])
