@@ -60,8 +60,9 @@ def _normalise_angles(arr):
     out[0] = 2.0 * out[0] / 90.0 - 1.0
     out[2] = 2.0 * out[2] / 90.0 - 1.0
     # Azimuth channels (1, 3):  wrap to [-180, 180] then scale to [-1, 1]
-    out[1] = np.where(out[1] > 180.0, out[1] - 360.0, out[1]) / 180.0
-    out[3] = np.where(out[3] > 180.0, out[3] - 360.0, out[3]) / 180.0
+    # [0, 360] to [-1, 1] directly
+    out[1] = out[1] / 180.0 - 1.0
+    out[3] = out[3] / 180.0 - 1.0
     return np.clip(out, -1.0, 1.0)
 
 
@@ -120,6 +121,7 @@ class PairedDataset(Dataset):
     """
 
     def __init__(self, split="train", split_ratio=0.9, data_dir="data"):
+        self.split = split
         vis_paths = _find_files(data_dir, "vis")
         ir_paths = _find_files(data_dir, "ir")
         angle_paths = _find_files(data_dir, "angles")
@@ -145,6 +147,20 @@ class PairedDataset(Dataset):
         cutoff = int(n * split_ratio)
         keys = common[:cutoff] if split == "train" else common[cutoff:]
         self.triples = [(vis_keys[k], ir_keys[k], angle_keys[k]) for k in keys]
+
+        # ---- Filter out any triple containing NaN / Inf in its arrays ----
+        valid = []
+        for vis_p, ir_p, ang_p in self.triples:
+            v = np.load(vis_p)
+            i = np.load(ir_p)
+            a = np.load(ang_p)
+            if np.isfinite(v).all() and np.isfinite(i).all() and np.isfinite(a).all():
+                valid.append((vis_p, ir_p, ang_p))
+        dropped = len(self.triples) - len(valid)
+        if dropped:
+            print(f"[PairedDataset] {self.split} — dropped {dropped}/{len(self.triples)} "
+                  f"pairs with NaN/Inf values")
+        self.triples = valid
 
     def __len__(self):
         return len(self.triples)

@@ -73,7 +73,7 @@ def _strip_compile_prefix(state_dict):
 
 
 @torch.inference_mode()
-def _validate(unet, diff, vae, ir_encoder, val_loader, device, latent_scale=0.25, steps=50):
+def _validate(unet, diff, vae, ir_encoder, val_loader, device, latent_scale=0.25, steps=200):
     """DDIM sampling on validation set → decode → L1 + SSIM."""
     unet.eval()
     ir_encoder.eval()
@@ -111,7 +111,7 @@ def main():
                         help="Optional: resume IR encoder weights")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=200)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=5e-5)
     parser.add_argument("--z_dim", type=int, default=4)
     parser.add_argument("--ir_out_ch", type=int, default=4)
     parser.add_argument("--T", type=int, default=1000)
@@ -124,7 +124,7 @@ def main():
     parser.add_argument("--out_dir", type=str, default="checkpoints")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--amp", action="store_true", default=True)
+    parser.add_argument("--amp", action="store_true", default=False)
     parser.add_argument("--no_amp", dest="amp", action="store_false")
     parser.add_argument("--clip_grad", type=float, default=1.0)
     parser.add_argument("--log_dir", type=str, default="runs/ldm")
@@ -137,7 +137,7 @@ def main():
     scaler = torch.amp.GradScaler("cuda") if use_amp else None
     scaler = None
     if device.type == "cuda":
-        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.benchmark = False
     print(f"Device: {device}  |  AMP: {use_amp}  |  Logs: {args.log_dir}")
 
     # ---- Frozen VAE encoder ----
@@ -166,11 +166,11 @@ def main():
 
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size, shuffle=True,
-        num_workers=args.num_workers, pin_memory=False, drop_last=True,
+        num_workers=args.num_workers, pin_memory=True, drop_last=True,
     )
     val_loader = DataLoader(
         val_ds, batch_size=min(args.batch_size, len(val_ds)), shuffle=False,
-        num_workers=args.num_workers, pin_memory=False,
+        num_workers=args.num_workers, pin_memory=True,
     )
 
     # ---- Diffusion ----
@@ -185,8 +185,8 @@ def main():
     ).to(device)
 
     if device.type == "cuda":
-        ir_encoder = torch.compile(ir_encoder, mode="default")
-        unet = torch.compile(unet, mode="default")
+        ir_encoder = torch.compile(ir_encoder, mode="reduce-overhead")
+        unet = torch.compile(unet, mode="reduce-overhead")
 
     # ---- Optimizer (IR encoder + U-Net, jointly) ----
     trainable_params = list(ir_encoder.parameters()) + list(unet.parameters())
@@ -209,6 +209,7 @@ def main():
     gc.collect()
     if device.type == "cuda":
         torch.cuda.empty_cache()
+        
     # ---- Loop ----
     for epoch in range(start_epoch, args.epochs):
         ir_encoder.train()
@@ -218,6 +219,7 @@ def main():
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch:3d}/{args.epochs}", unit="batch")
         for step, (ir, angles, vis) in enumerate(pbar):
+            assert torch.isfinite(ir).all()
             ir = ir.to(device)
             angles = angles.to(device)
             vis = vis.to(device)
@@ -225,8 +227,18 @@ def main():
 
             # Encode VIS (frozen, no grad)
             with torch.inference_mode():
-                z_vis, _ = vae.encoder(vis)
-                z_vis = 0.25 * z_vis
+                z_vis, _ = vae.encoder(vis) # mu, logvar
+                if not torch.isfinite(z_vis).all():
+                    opt.zero_grad(set_to_none=True)
+                    tqdm.write(f"  [WARN] NaN in VAE mu at epoch {epoch} step {step} — skipping")
+                    continue 
+                z_vis = 0.25 * z_vis # scale to std around 1.0 to be the same magnitude as the noise added
+                # z_vis = z_vis.clamp(-4.0, 4.0)
+
+            if not torch.isfinite(angles).all():
+                opt.zero_grad(set_to_none=True)
+                tqdm.write(f"  [WARN] NaN in angles at epoch {epoch} step {step} — skipping")
+                continue
             angles_128 = F.interpolate(angles, size=(128, 128), mode="bilinear")
             t = diff.sample_timesteps(B, device)
             z_t, noise = diff.q_sample(z_vis, t)
@@ -234,6 +246,18 @@ def main():
             # IR encoder + U-Net forward (trainable, with grad)
             with torch.autocast(device_type="cuda", enabled=use_amp, dtype=torch.bfloat16):
                 f_ir = ir_encoder(ir)
+                if not torch.isfinite(z_t).all():
+                    opt.zero_grad(set_to_none=True)
+                    tqdm.write(f"  [WARN] NaN in z_t at epoch {epoch} step {step} — skipping")
+                    continue
+                if not torch.isfinite(angles_128).all():
+                    opt.zero_grad(set_to_none=True)
+                    tqdm.write(f"  [WARN] NaN in angles_128 at epoch {epoch} step {step} — skipping")
+                    continue
+                if not torch.isfinite(f_ir).all():
+                    opt.zero_grad(set_to_none=True)
+                    tqdm.write(f"  [WARN] NaN in f_ir at epoch {epoch} step {step} — skipping")
+                    continue
                 model_input = torch.cat([z_t, f_ir, angles_128], dim=1)
                 pred_noise = unet(model_input, t)
 
@@ -243,6 +267,7 @@ def main():
             if not torch.isfinite(loss):
                 opt.zero_grad(set_to_none=True)
                 tqdm.write(f"  [WARN] NaN loss at epoch {epoch} step {step} — skipping batch")
+                # print(f"   pred_noise min/max: {pred_noise.min().item():.3f} {pred_noise.max().item():.3f}")
                 gc.collect()
                 continue
 
@@ -265,6 +290,7 @@ def main():
                 opt.zero_grad(set_to_none=True)
                 ema.update(unet)
 
+            '''
             if step % 100 == 0:
                 with torch.no_grad():
                     print(
@@ -274,6 +300,13 @@ def main():
                         "mean", z_vis.mean().item(),
                         "std", z_vis.std().item(),
                     )
+                    print("angles:",
+                          "min", angles_128.min().item(),
+                          "max", angles_128.max().item(),
+                          "mean", angles_128.mean().item(),
+                          "std", angles_128.std().item(),
+                    )
+            '''
 
             # Free large intermediates — prevents RAM bloat from torch.compile
             # caches and stale computation graph references
@@ -319,7 +352,6 @@ def main():
             tqdm.write(f"  Saved → {path}")
 
         pbar.close()
-        torch._dynamo.reset()
     
     writer.close()
     print("Stage 2 (LDM) complete.")
