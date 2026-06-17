@@ -160,6 +160,55 @@ class SelfAttention(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Cross-attention (Q from local features, K/V from conditioning)
+# ---------------------------------------------------------------------------
+class CrossAttention(nn.Module):
+    """
+    Multi-head cross-attention: Q from U-Net features, K/V from conditioning.
+
+    Q source (x) and K/V source (kv) must have the same spatial resolution.
+    The KV channels are projected to match the Q channels internally.
+    """
+
+    def __init__(self, query_channels, kv_channels=None, num_heads=4):
+        super().__init__()
+        if kv_channels is None:
+            kv_channels = query_channels
+        assert query_channels % num_heads == 0
+        self.num_heads = num_heads
+        self.head_dim = query_channels // num_heads
+
+        self.norm_q = _group_norm(query_channels)
+        self.norm_kv = _group_norm(kv_channels)
+        self.q = nn.Conv2d(query_channels, query_channels, 1, bias=False)
+        self.k = nn.Conv2d(kv_channels, query_channels, 1, bias=False)
+        self.v = nn.Conv2d(kv_channels, query_channels, 1, bias=False)
+        self.proj = nn.Conv2d(query_channels, query_channels, 1)
+
+    def forward(self, x, kv):
+        """
+        Args:
+            x:  (B, C_q, H, W) — U-Net features (Q source).
+            kv: (B, C_kv, H, W) — conditioning features (K/V source), same H,W.
+
+        Returns:
+            (B, C_q, H, W) — attended features with residual connection.
+        """
+        B, C, H, W = x.shape
+        q = self.q(self.norm_q(x))
+        k = self.k(self.norm_kv(kv))
+        v = self.v(self.norm_kv(kv))
+
+        q = q.reshape(B, self.num_heads, self.head_dim, H * W).transpose(-1, -2)
+        k = k.reshape(B, self.num_heads, self.head_dim, H * W).transpose(-1, -2)
+        v = v.reshape(B, self.num_heads, self.head_dim, H * W).transpose(-1, -2)
+
+        out = F.scaled_dot_product_attention(q, k, v)
+        out = out.transpose(-1, -2).reshape(B, C, H, W)
+        return x + self.proj(out)
+
+
+# ---------------------------------------------------------------------------
 # Downsample / Upsample
 # ---------------------------------------------------------------------------
 class Downsample(nn.Module):

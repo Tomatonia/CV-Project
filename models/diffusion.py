@@ -82,7 +82,7 @@ class GaussianDiffusion(nn.Module):
         sqrt_alpha = self.sqrt_alphas_cumprod[t]
         sqrt_one_minus = self.sqrt_one_minus_alphas_cumprod[t]
 
-        # Reshape for broadcasting
+        # Reshape to (B, 1, 1, 1)
         while sqrt_alpha.dim() < x_0.dim():
             sqrt_alpha = sqrt_alpha.unsqueeze(-1)
             sqrt_one_minus = sqrt_one_minus.unsqueeze(-1)

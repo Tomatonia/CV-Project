@@ -73,7 +73,7 @@ def _strip_compile_prefix(state_dict):
 
 
 @torch.inference_mode()
-def _validate(unet, diff, vae, ir_encoder, val_loader, device, latent_scale=0.25, steps=200):
+def _validate(unet, diff, vae, ir_encoder, val_loader, device, latent_scale=0.25, steps=50):
     """DDIM sampling on validation set → decode → L1 + SSIM."""
     unet.eval()
     ir_encoder.eval()
@@ -86,15 +86,17 @@ def _validate(unet, diff, vae, ir_encoder, val_loader, device, latent_scale=0.25
         angles = angles.to(device)
         vis = vis.to(device)
 
-        f_ir = ir_encoder(ir)
-        angles_128 = F.interpolate(angles, size=(128, 128), mode="bilinear")
-        cond = torch.cat([f_ir, angles_128], dim=1)  # (B, 8, 128, 128)
+        with torch.no_grad():
+            f_ir = ir_encoder(ir)
+            angles_128 = F.interpolate(angles, size=(128, 128), mode="bilinear")
+            cond = torch.cat([f_ir, angles_128], dim=1)  # (B, 8, 128, 128)
 
-        z_0 = diff.ddim_sample_loop(unet, (B, 4, 128, 128), cond, steps=steps) # 50 forward steps for faster speed
-        z_0 = z_0 / latent_scale
-        recon = vae.decode(z_0)
-        total_l1 += F.l1_loss(recon, vis).item() * B
-        total_ssim += ssim_loss(recon, vis).item() * B
+            z_0 = diff.ddim_sample_loop(unet, (B, 4, 128, 128), cond, steps=steps) # 50 forward steps for faster speed
+            z_0 = z_0 / latent_scale
+            recon = vae.decode(z_0)
+            total_l1 += F.l1_loss(recon, vis).item() * B
+            total_ssim += ssim_loss(recon, vis).item() * B
+
         count += B
 
     unet.train()
@@ -111,7 +113,7 @@ def main():
                         help="Optional: resume IR encoder weights")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=200)
-    parser.add_argument("--lr", type=float, default=5e-5)
+    parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--z_dim", type=int, default=4)
     parser.add_argument("--ir_out_ch", type=int, default=4)
     parser.add_argument("--T", type=int, default=1000)
@@ -235,10 +237,13 @@ def main():
                 z_vis = 0.25 * z_vis # scale to std around 1.0 to be the same magnitude as the noise added
                 # z_vis = z_vis.clamp(-4.0, 4.0)
 
+            '''
             if not torch.isfinite(angles).all():
                 opt.zero_grad(set_to_none=True)
                 tqdm.write(f"  [WARN] NaN in angles at epoch {epoch} step {step} — skipping")
                 continue
+            '''
+
             angles_128 = F.interpolate(angles, size=(128, 128), mode="bilinear")
             t = diff.sample_timesteps(B, device)
             z_t, noise = diff.q_sample(z_vis, t)
@@ -246,6 +251,7 @@ def main():
             # IR encoder + U-Net forward (trainable, with grad)
             with torch.autocast(device_type="cuda", enabled=use_amp, dtype=torch.bfloat16):
                 f_ir = ir_encoder(ir)
+                '''
                 if not torch.isfinite(z_t).all():
                     opt.zero_grad(set_to_none=True)
                     tqdm.write(f"  [WARN] NaN in z_t at epoch {epoch} step {step} — skipping")
@@ -258,6 +264,7 @@ def main():
                     opt.zero_grad(set_to_none=True)
                     tqdm.write(f"  [WARN] NaN in f_ir at epoch {epoch} step {step} — skipping")
                     continue
+                '''
                 model_input = torch.cat([z_t, f_ir, angles_128], dim=1)
                 pred_noise = unet(model_input, t)
 
