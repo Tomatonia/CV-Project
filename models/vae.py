@@ -220,6 +220,9 @@ def ssim_loss(x, y, window_size=11, sigma=1.5):
     a Gaussian window — penalises structural differences like blurred
     cloud edges that L1 alone would tolerate.
 
+    SSIM assumes non-negative luminance, so inputs in [-1, 1] are
+    shifted to [0, 1] internally.
+
     Args:
         x, y: (B, C, H, W) tensors in [-1, 1].
         window_size: Gaussian kernel size (11 = standard).
@@ -228,7 +231,11 @@ def ssim_loss(x, y, window_size=11, sigma=1.5):
     Returns:
         scalar: 1 - mean SSIM across channels and spatial positions.
     """
-    C1 = 0.01 ** 2   # luminance stabiliser  (K1·L)²,  L = dynamic range 2)
+    # SSIM expects non-negative values — shift [-1, 1] → [0, 1]
+    x = (x + 1.0) / 2.0
+    y = (y + 1.0) / 2.0
+
+    C1 = 0.01 ** 2   # luminance stabiliser  (K1·L)²,  L = dynamic range 1)
     C2 = 0.03 ** 2   # contrast stabiliser    (K2·L)²
 
     # Gaussian window

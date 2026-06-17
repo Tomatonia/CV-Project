@@ -42,7 +42,7 @@ class GaussianDiffusion(nn.Module):
         x_0 = diff.ddim_sample(model, shape, conditioning_fn)
     """
 
-    def __init__(self, T=1000, schedule="cosine", beta_start=1e-4, beta_end=0.02):
+    def __init__(self, T=1000, schedule="linear", beta_start=1e-4, beta_end=0.02):
         super().__init__()
         self.T = T
 
@@ -135,6 +135,7 @@ class GaussianDiffusion(nn.Module):
             sqrt_alpha_bar = alpha_bar_t.sqrt()
             sqrt_one_minus_alpha = (1.0 - alpha_bar_t).sqrt()
             pred_x0 = (x - sqrt_one_minus_alpha * pred_noise) / sqrt_alpha_bar
+            pred_x0 = pred_x0.clamp(-4.0, 4.0)  # prevent explosion when noise prediction is inaccurate
 
             # Direction pointing to x_t
             dir_xt = (1.0 - alpha_bar_prev).sqrt() * pred_noise
@@ -184,6 +185,7 @@ class GaussianDiffusion(nn.Module):
             sqrt_alpha_bar = alpha_bar_t.sqrt()
             sqrt_one_minus = (1.0 - alpha_bar_t).sqrt()
             pred_x0 = (x - sqrt_one_minus * pred_noise) / sqrt_alpha_bar
+            pred_x0 = pred_x0.clamp(-4.0, 4.0)  # prevent explosion when noise prediction is inaccurate
 
             dir_xt = (1.0 - alpha_bar_prev).sqrt() * pred_noise
 

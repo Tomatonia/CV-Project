@@ -97,8 +97,8 @@ class ResBlock(nn.Module):
         self.time_emb_dim = time_emb_dim
         if time_emb_dim is not None:
             self.time_proj = nn.Linear(time_emb_dim, out_ch * 2)
-            # nn.init.zeros_(self.time_proj.weight)
-            # nn.init.zeros_(self.time_proj.bias)
+            nn.init.zeros_(self.time_proj.weight)
+            nn.init.zeros_(self.time_proj.bias)
 
         self.skip = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
 
@@ -109,8 +109,8 @@ class ResBlock(nn.Module):
 
         if self.time_emb_dim is not None and t_emb is not None:
             scale, shift = self.time_proj(t_emb).chunk(2, dim=1)
-            # scale = 2.0 * torch.tanh(scale / 2.0)   # range [-2, 2]
-            # shift = 2.0 * torch.tanh(shift / 2.0)   # range [-2, 2]
+            scale = 2.0 * torch.tanh(scale / 2.0)   # range [-2, 2]
+            shift = 2.0 * torch.tanh(shift / 2.0)   # range [-2, 2]
             h = h * (1 + scale.unsqueeze(-1).unsqueeze(-1)) + shift.unsqueeze(-1).unsqueeze(-1)
 
         h = self.norm2(h)

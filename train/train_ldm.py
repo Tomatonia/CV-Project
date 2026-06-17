@@ -176,7 +176,7 @@ def main():
     )
 
     # ---- Diffusion ----
-    diff = GaussianDiffusion(T=args.T, schedule="cosine").to(device)
+    diff = GaussianDiffusion(T=args.T, schedule="linear").to(device)
 
     # ---- U-Net ----
     unet = LDMUNet(
@@ -234,8 +234,8 @@ def main():
                     opt.zero_grad(set_to_none=True)
                     tqdm.write(f"  [WARN] NaN in VAE mu at epoch {epoch} step {step} — skipping")
                     continue 
-                z_vis = 0.25 * z_vis # scale to std around 1.0 to be the same magnitude as the noise added
-                # z_vis = z_vis.clamp(-4.0, 4.0)
+                z_vis = 0.25 * z_vis
+                z_vis = z_vis.clamp(-4.0, 4.0)
 
             '''
             if not torch.isfinite(angles).all():
@@ -336,7 +336,7 @@ def main():
                 val_l1, val_ssim = _validate(unet, diff, vae, ir_encoder, val_loader,
                                    device, steps=args.ddim_steps)
             ema.restore(unet)
-            tqdm.write(f"  Val L1 (DDIM{args.ddim_steps}) = {val_l1:.4f}, Val SSIM = {val_ssim:.4f}")
+            tqdm.write(f"  Val L1 = {val_l1:.4f}, Val SSIM loss (1-SSIM) = {val_ssim:.4f}")
             writer.add_scalar("val/L1", val_l1, epoch)
             writer.add_scalar("val/SSIM", val_ssim, epoch)
             gc.collect()
