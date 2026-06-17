@@ -81,7 +81,7 @@ class LDMUNet(nn.Module):
         ch_mult=(1, 2, 2, 2),
         num_res_blocks=2,
         attn_resolutions=(32, 16),
-        dropout=0.1,
+        dropout=0.0,
         num_heads=4,
     ):
         super().__init__()

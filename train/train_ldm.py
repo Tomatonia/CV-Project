@@ -200,8 +200,8 @@ def main():
 
     if args.resume:
         ckpt = torch.load(args.resume, map_location=device, weights_only=False)
-        unet.load_state_dict(_strip_compile_prefix(ckpt["unet"]))
-        ir_encoder.load_state_dict(_strip_compile_prefix(ckpt["ir_encoder"]))
+        unet.load_state_dict(ckpt["unet"])
+        ir_encoder.load_state_dict(ckpt["ir_encoder"])
         opt.load_state_dict(ckpt["opt"])
         ema.shadow = ckpt["ema_shadow"]
         start_epoch = ckpt["epoch"] + 1
