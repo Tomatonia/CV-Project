@@ -15,6 +15,23 @@ def _clean(state_dict):
     """Remove '_orig_mod.' prefix added by torch.compile."""
     return {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
 
+def _normalise_angles(arr):
+    """Normalise (4, H, W) float32 degree angles → [-1, 1].
+
+    Channel 0 — solar zenith   [0, 90]   → [-1, 1]
+    Channel 1 — solar azimuth   [0, 360] → [-180, 180] → [-1, 1]
+    Channel 2 — satellite zenith [~0, ~90] → [-1, 1]
+    Channel 3 — satellite azimuth [0, 360] → [-180, 180] → [-1, 1]
+    """
+    out = arr.astype(np.float32).copy()
+    # Zenith channels (0, 2):  scale [0, 90] → [-1, 1]
+    out[0] = 2.0 * out[0] / 90.0 - 1.0
+    out[2] = 2.0 * out[2] / 90.0 - 1.0
+    # Azimuth channels (1, 3):  wrap to [-180, 180] then scale to [-1, 1]
+    # [0, 360] to [-1, 1] directly
+    out[1] = out[1] / 180.0 - 1.0
+    out[3] = out[3] / 180.0 - 1.0
+    return np.clip(out, -1.0, 1.0)
 
 def main():
     parser = argparse.ArgumentParser(description="Visualizing LDM results")
@@ -27,6 +44,7 @@ def main():
                         help="Also save VIS ground truth for comparison")
     parser.add_argument("--T", type=int, default=1000)
     parser.add_argument("--ddim_steps", type=int, default=200)
+    parser.add_argument("--latent_scale", type=float, default=0.25)
     parser.add_argument("--output", type=str, default="results/ldm")
     args = parser.parse_args()
 
@@ -55,7 +73,7 @@ def main():
         p.requires_grad = False
 
     # ---- Load LDM checkpoint (EMA weights already baked in) ----
-    ckpt = torch.load(args.ldm_ckpt, map_location=device, weights_only=False)
+    ckpt = torch.load(args.ldm_ckpt, map_location=device, weights_only=True)
 
     ir_encoder = LightweightIREncoder(in_channels=3, out_channels=4, ch=64).to(device)
     ir_encoder.load_state_dict(_clean(ckpt["ir_encoder"]))
@@ -65,7 +83,7 @@ def main():
     unet.load_state_dict(_clean(ckpt["unet"]))
     unet.eval()
 
-    diff = GaussianDiffusion(T=args.T, schedule="cosine")
+    diff = GaussianDiffusion(T=args.T, schedule="linear")
 
     # ---- Load inputs ----
     ir_img = np.load(ir_img_path)
@@ -73,6 +91,7 @@ def main():
     ir_img_t = torch.from_numpy(ir_img).to(device).unsqueeze(0)  # [1, 3, 512, 512]
 
     angles = np.load(angles_img_path)
+    angles = _normalise_angles(angles)
     angles = torch.from_numpy(angles).to(device).unsqueeze(0)    # [1, 4, 512, 512]
 
     # ---- Forward pass ----
@@ -81,6 +100,7 @@ def main():
         angles_128 = F.interpolate(angles, size=(128, 128), mode="bilinear")
         cond = torch.cat([f_ir, angles_128], dim=1)              # (1, 8, 128, 128)
         z_0 = diff.ddim_sample_loop(unet, (1, 4, 128, 128), cond, steps=args.ddim_steps)
+        z_0 = z_0 / args.latent_scale
         recon = vae.decode(z_0)
 
     output = recon.squeeze().detach().cpu().numpy()

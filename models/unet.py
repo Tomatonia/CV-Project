@@ -172,7 +172,7 @@ class LDMUNet(nn.Module):
         # Split conditioning from input — both paths get the conditioning:
         #  1. Input concatenation (via in_conv) for all-level spatial conditioning
         #  2. Cross-attention K,V (via cond_encoder) at 32×32 and 16×16
-        cond = x[:, 4:]  # (B, 8, 128, 128) — f_IR + angles
+        cond = x[:, 4:, :, :]  # (B, 8, 128, 128) — f_IR + angles
         cond_feats = self.cond_encoder(cond)  # {32: (B,256,32,32), 16: (B,256,16,16)}
 
         t_emb = self.time_emb(t)

@@ -24,7 +24,7 @@ def _cosine_schedule(T, s=0.008):
 
 def _linear_schedule(T, beta_start=1e-4, beta_end=0.02):
     """Linear noise schedule (Ho et al., 2020)."""
-    return torch.linspace(beta_start, beta_end, T, dtype=torch.float32)
+    return torch.linspace(beta_start, beta_end, T + 1, dtype=torch.float32)
 
 
 class GaussianDiffusion(nn.Module):
@@ -61,7 +61,7 @@ class GaussianDiffusion(nn.Module):
 
     def sample_timesteps(self, batch_size, device=None):
         """Sample random timesteps ~ Uniform(0, T)."""
-        return torch.randint(0, self.T, (batch_size,), device=device, dtype=torch.long)
+        return torch.randint(0, self.T + 1, (batch_size,), device=device, dtype=torch.long)
 
     def q_sample(self, x_0, t, noise=None):
         """
@@ -115,38 +115,36 @@ class GaussianDiffusion(nn.Module):
         if cond is not None:
             cond = cond.to(device)
 
-        # DDIM sub-sequence
-        step_indices = torch.linspace(self.T - 1, 0, steps, dtype=torch.long, device=device)
+        # DDIM sub-sequence from noisiest → cleanest
+        seq = torch.linspace(self.T, 0, steps, dtype=torch.long, device=device)
 
-        x = torch.randn(shape, device=device)
+        x = torch.randn(shape, device=device)  # x at timestep seq[0] = T
 
-        for i, t_idx in enumerate(step_indices):
-            t = torch.full((batch_size,), t_idx, device=device, dtype=torch.long)
+        for i in range(len(seq) - 1):
+            t_cur = seq[i]       # current timestep (noisier)
+            t_next = seq[i + 1]  # next timestep (less noisy)
+
+            t = torch.full((batch_size,), t_cur.item(), device=device, dtype=torch.long)
 
             # Build model input: [x_t || conditioning]
             model_input = torch.cat([x, cond], dim=1) if cond is not None else x
             pred_noise = model(model_input, t)
 
-            # DDIM update
-            alpha_bar_t = self.alphas_cumprod[t_idx]
-            alpha_bar_prev = self.alphas_cumprod[step_indices[i - 1]] if i > 0 else torch.tensor(1.0, device=device)
+            alpha_cur = self.alphas_cumprod[t_cur]
+            alpha_next = self.alphas_cumprod[t_next]
 
-            # Predicted x_0
-            sqrt_alpha_bar = alpha_bar_t.sqrt()
-            sqrt_one_minus_alpha = (1.0 - alpha_bar_t).sqrt()
-            pred_x0 = (x - sqrt_one_minus_alpha * pred_noise) / sqrt_alpha_bar
-            pred_x0 = pred_x0.clamp(-4.0, 4.0)  # prevent explosion when noise prediction is inaccurate
+            sqrt_alpha_cur = alpha_cur.sqrt()
+            sqrt_one_minus_cur = (1.0 - alpha_cur).sqrt()
+            pred_x0 = (x - sqrt_one_minus_cur * pred_noise) / sqrt_alpha_cur
 
-            # Direction pointing to x_t
-            dir_xt = (1.0 - alpha_bar_prev).sqrt() * pred_noise
-
-            # Random noise (only for stochastic DDPM, η > 0)
+            # DDIM update: x at t_cur → x at t_next
+            #   x_next = √(α_next)·pred_x0 + √(1-α_next - σ²)·ε̂ + σ·z
             if eta > 0:
-                sigma = eta * ((1 - alpha_bar_prev) / (1 - alpha_bar_t) * (1 - alpha_bar_t / alpha_bar_prev)).sqrt()
-                noise = torch.randn_like(x)
-                x = alpha_bar_prev.sqrt() * pred_x0 + dir_xt + sigma * noise
+                sigma = eta * ((1 - alpha_next) / (1 - alpha_cur) * (1 - alpha_cur / alpha_next)).sqrt()
+                pred_noise_coeff = (1.0 - alpha_next - sigma ** 2).clamp(min=0).sqrt()
+                x = alpha_next.sqrt() * pred_x0 + pred_noise_coeff * pred_noise + sigma * torch.randn_like(x)
             else:
-                x = alpha_bar_prev.sqrt() * pred_x0 + dir_xt
+                x = alpha_next.sqrt() * pred_x0 + (1.0 - alpha_next).sqrt() * pred_noise
 
         return x
 
@@ -170,29 +168,33 @@ class GaussianDiffusion(nn.Module):
         batch_size = shape[0]
         cond = cond_latent.to(device) if cond_latent is not None else None
 
-        step_indices = torch.linspace(self.T - 1, 0, steps, dtype=torch.long, device=device)
+        # DDIM sub-sequence from noisiest → cleanest
+        seq = torch.linspace(self.T, 0, steps, dtype=torch.long, device=device)
 
-        x = torch.randn(shape, device=device)
+        x = torch.randn(shape, device=device)  # x at timestep seq[0] = T
 
-        for i, t_idx in enumerate(step_indices):
-            t = torch.full((batch_size,), t_idx, device=device, dtype=torch.long)
+        for i in range(len(seq) - 1):
+            t_cur = seq[i]       # current timestep (noisier)
+            t_next = seq[i + 1]  # next timestep (less noisy)
+
+            t = torch.full((batch_size,), t_cur.item(), device=device, dtype=torch.long)
             model_input = torch.cat([x, cond], dim=1) if cond is not None else x
             pred_noise = model(model_input, t)
 
-            alpha_bar_t = self.alphas_cumprod[t_idx]
-            alpha_bar_prev = self.alphas_cumprod[step_indices[i - 1]] if i > 0 else torch.tensor(1.0, device=device)
+            alpha_cur = self.alphas_cumprod[t_cur]
+            alpha_next = self.alphas_cumprod[t_next]
 
-            sqrt_alpha_bar = alpha_bar_t.sqrt()
-            sqrt_one_minus = (1.0 - alpha_bar_t).sqrt()
-            pred_x0 = (x - sqrt_one_minus * pred_noise) / sqrt_alpha_bar
-            pred_x0 = pred_x0.clamp(-4.0, 4.0)  # prevent explosion when noise prediction is inaccurate
+            sqrt_alpha_cur = alpha_cur.sqrt()
+            sqrt_one_minus_cur = (1.0 - alpha_cur).sqrt()
+            pred_x0 = (x - sqrt_one_minus_cur * pred_noise) / sqrt_alpha_cur
 
-            dir_xt = (1.0 - alpha_bar_prev).sqrt() * pred_noise
-
+            # DDIM update: x at t_cur → x at t_next
+            #   x_next = √(α_next)·pred_x0 + √(1-α_next - σ²)·ε̂ + σ·z
             if eta > 0:
-                sigma = eta * ((1 - alpha_bar_prev) / (1 - alpha_bar_t) * (1 - alpha_bar_t / alpha_bar_prev)).sqrt()
-                x = alpha_bar_prev.sqrt() * pred_x0 + dir_xt + sigma * torch.randn_like(x)
+                sigma = eta * ((1 - alpha_next) / (1 - alpha_cur) * (1 - alpha_cur / alpha_next)).sqrt()
+                pred_noise_coeff = (1.0 - alpha_next - sigma ** 2).clamp(min=0).sqrt()
+                x = alpha_next.sqrt() * pred_x0 + pred_noise_coeff * pred_noise + sigma * torch.randn_like(x)
             else:
-                x = alpha_bar_prev.sqrt() * pred_x0 + dir_xt
+                x = alpha_next.sqrt() * pred_x0 + (1.0 - alpha_next).sqrt() * pred_noise
 
         return x
