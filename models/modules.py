@@ -109,8 +109,8 @@ class ResBlock(nn.Module):
 
         if self.time_emb_dim is not None and t_emb is not None:
             scale, shift = self.time_proj(t_emb).chunk(2, dim=1)
-            scale = 2.0 * torch.tanh(scale / 2.0)   # range [-2, 2]
-            shift = 2.0 * torch.tanh(shift / 2.0)   # range [-2, 2]
+            # scale = 2.0 * torch.tanh(scale / 2.0)   # range [-2, 2]
+            # shift = 2.0 * torch.tanh(shift / 2.0)   # range [-2, 2]
             h = h * (1 + scale.unsqueeze(-1).unsqueeze(-1)) + shift.unsqueeze(-1).unsqueeze(-1)
 
         h = self.norm2(h)

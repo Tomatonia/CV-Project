@@ -44,6 +44,7 @@ def main():
                         help="Also save VIS ground truth for comparison")
     parser.add_argument("--T", type=int, default=1000)
     parser.add_argument("--ddim_steps", type=int, default=200)
+    parser.add_argument("--ddim_eta", type=float, default=0.0)
     parser.add_argument("--latent_scale", type=float, default=0.25)
     parser.add_argument("--output", type=str, default="results/ldm")
     args = parser.parse_args()
@@ -99,12 +100,12 @@ def main():
         f_ir = ir_encoder(ir_img_t)
         angles_128 = F.interpolate(angles, size=(128, 128), mode="bilinear")
         cond = torch.cat([f_ir, angles_128], dim=1)              # (1, 8, 128, 128)
-        z_0 = diff.ddim_sample_loop(unet, (1, 4, 128, 128), cond, steps=args.ddim_steps)
+        z_0 = diff.ddim_sample_loop(unet, (1, 4, 128, 128), cond, steps=args.ddim_steps, eta=args.ddim_eta)
         z_0 = z_0 / args.latent_scale
         recon = vae.decode(z_0)
 
     output = recon.squeeze().detach().cpu().numpy()
-    output = ((output + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
+    output = ((output + 1.0) * 127.5).clip(0, 255) # .astype(np.uint8)
     plt.imsave(
         os.path.join(args.output, f"{satellite}_ldm_{timestamp}.jpg"),
         output, cmap="gray", vmin=0, vmax=255,

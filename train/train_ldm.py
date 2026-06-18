@@ -192,7 +192,7 @@ def main():
 
     # ---- Optimizer (IR encoder + U-Net, jointly) ----
     trainable_params = list(ir_encoder.parameters()) + list(unet.parameters())
-    opt = torch.optim.Adam(trainable_params, lr=args.lr, betas=(0.9, 0.999))
+    opt = torch.optim.AdamW(trainable_params, lr=args.lr, betas=(0.9, 0.999), weight_decay=0.01)
 
     # EMA on U-Net only (IR encoder is small enough to not need it)
     ema = EMA(unet, decay=args.ema_decay)
@@ -235,7 +235,7 @@ def main():
                     tqdm.write(f"  [WARN] NaN in VAE mu at epoch {epoch} step {step} — skipping")
                     continue 
                 z_vis = 0.25 * z_vis
-                z_vis = z_vis.clamp(-4.0, 4.0)
+                # z_vis = z_vis.clamp(-4.0, 4.0)
 
             '''
             if not torch.isfinite(angles).all():
