@@ -14,7 +14,7 @@ import numpy as np
 
 def _cosine_schedule(T, s=0.008):
     """Cosine noise schedule (Nichol & Dhariwal, 2021)."""
-    steps = torch.arange(T + 1, dtype=torch.float32)
+    steps = torch.arange(0, T + 1, dtype=torch.float32)
     f = torch.cos((steps / T + s) / (1 + s) * (np.pi / 2)) ** 2
     alpha_bar = f / f[0]
     betas = 1 - alpha_bar[1:] / alpha_bar[:-1]
@@ -24,7 +24,7 @@ def _cosine_schedule(T, s=0.008):
 
 def _linear_schedule(T, beta_start=1e-4, beta_end=0.02):
     """Linear noise schedule (Ho et al., 2020)."""
-    return torch.linspace(beta_start, beta_end, T + 1, dtype=torch.float32)
+    return torch.linspace(beta_start, beta_end, T, dtype=torch.float32)
 
 
 class GaussianDiffusion(nn.Module):
@@ -61,7 +61,7 @@ class GaussianDiffusion(nn.Module):
 
     def sample_timesteps(self, batch_size, device=None):
         """Sample random timesteps ~ Uniform(0, T)."""
-        return torch.randint(0, self.T + 1, (batch_size,), device=device, dtype=torch.long)
+        return torch.randint(0, self.T, (batch_size,), device=device, dtype=torch.long)
 
     def q_sample(self, x_0, t, noise=None):
         """
@@ -116,13 +116,13 @@ class GaussianDiffusion(nn.Module):
             cond = cond.to(device)
 
         # DDIM sub-sequence from noisiest → cleanest
-        seq = torch.linspace(self.T, 0, steps, dtype=torch.long, device=device)
+        seq = torch.linspace(self.T - 1, -1, steps + 1, dtype=torch.long, device=device)
 
         x = torch.randn(shape, device=device)  # x at timestep seq[0] = T
 
         for i in range(len(seq) - 1):
             t_cur = seq[i]       # current timestep (noisier)
-            t_next = seq[i + 1]  # next timestep (less noisy)
+            t_next = seq[i + 1]  # next timestep (less noisy), -1 = clean state with alpha=1
 
             t = torch.full((batch_size,), t_cur.item(), device=device, dtype=torch.long)
 
@@ -131,7 +131,10 @@ class GaussianDiffusion(nn.Module):
             pred_noise = model(model_input, t)
 
             alpha_cur = self.alphas_cumprod[t_cur]
-            alpha_next = self.alphas_cumprod[t_next]
+            if t_next == -1: # the final step
+                alpha_next = 1
+            else:
+                alpha_next = self.alphas_cumprod[t_next]
 
             sqrt_alpha_cur = alpha_cur.sqrt()
             sqrt_one_minus_cur = (1.0 - alpha_cur).sqrt()
@@ -169,9 +172,9 @@ class GaussianDiffusion(nn.Module):
         cond = cond_latent.to(device) if cond_latent is not None else None
 
         # DDIM sub-sequence from noisiest → cleanest
-        seq = torch.linspace(self.T, 0, steps, dtype=torch.long, device=device)
+        seq = torch.linspace(self.T - 1, -1, steps + 1, dtype=torch.long, device=device)
 
-        x = torch.randn(shape, device=device)  # x at timestep seq[0] = T
+        x = torch.randn(shape, device=device)  # x at timestep seq[0] = T - 1
 
         for i in range(len(seq) - 1):
             t_cur = seq[i]       # current timestep (noisier)
@@ -182,7 +185,10 @@ class GaussianDiffusion(nn.Module):
             pred_noise = model(model_input, t)
 
             alpha_cur = self.alphas_cumprod[t_cur]
-            alpha_next = self.alphas_cumprod[t_next]
+            if t_next == -1: # the final step
+                alpha_next = 1
+            else:
+                alpha_next = self.alphas_cumprod[t_next]
 
             sqrt_alpha_cur = alpha_cur.sqrt()
             sqrt_one_minus_cur = (1.0 - alpha_cur).sqrt()
