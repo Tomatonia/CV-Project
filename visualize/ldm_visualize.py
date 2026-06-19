@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
 
-from models.vae import VAE
+from models.vae import VAE, ssim_loss
 from models.ir_encoder import LightweightIREncoder
 from models.diffusion import GaussianDiffusion
 from models.unet import LDMUNet
@@ -95,6 +95,10 @@ def main():
     angles = _normalise_angles(angles)
     angles = torch.from_numpy(angles).to(device).unsqueeze(0)    # [1, 4, 512, 512]
 
+    vis_gt = np.load(vis_img_path)
+    vis = (vis_gt.astype(np.float32) / 127.5) - 1.0
+    vis = torch.from_numpy(vis).to(device).unsqueeze(0).unsqueeze(0) # [1, 1, 512, 512]
+
     # ---- Forward pass ----
     with torch.no_grad():
         f_ir = ir_encoder(ir_img_t)
@@ -103,6 +107,10 @@ def main():
         z_0 = diff.ddim_sample_loop(unet, (1, 4, 128, 128), cond, steps=args.ddim_steps, eta=args.ddim_eta)
         z_0 = z_0 / args.latent_scale
         recon = vae.decode(z_0)
+        l1 = F.l1_loss(recon, vis).item()
+        ssim = ssim_loss(recon, vis).item()
+
+    print(f"Validation results: L1 loss = {l1:.04f}, SSIM loss (1 - SSIM) = {ssim:.04f}")
 
     output = recon.squeeze().detach().cpu().numpy()
     output = ((output + 1.0) * 127.5).clip(0, 255) # .astype(np.uint8)
@@ -114,7 +122,6 @@ def main():
 
     # ---- Optional: VIS ground truth ----
     if args.vis_gt:
-        vis_gt = np.load(vis_img_path)
         plt.imsave(
             os.path.join(args.output, f"{satellite}_vis-truth_{timestamp}.jpg"),
             vis_gt, cmap="gray", vmin=0, vmax=255,

@@ -186,7 +186,7 @@ class GaussianDiffusion(nn.Module):
 
             alpha_cur = self.alphas_cumprod[t_cur]
             if t_next == -1: # the final step
-                alpha_next = 1
+                alpha_next = torch.full_like(t_next, 1.0)
             else:
                 alpha_next = self.alphas_cumprod[t_next]
 
