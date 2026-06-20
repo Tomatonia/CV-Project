@@ -4,7 +4,7 @@ Input:  [noisy B03 latent || IR latent || angles downsampled]  →  128×128×12
 Output: predicted noise                     →  128×128×4
 
 Channel multipliers [1, 2, 2, 2] × base_ch=128  →  [128, 256, 256, 256].
-Self-attention at 32×32 and 16×16.  Time embedding via sinusoidal → FiLM.
+Cross-attention at 32×32 and 16×16.  Time embedding via sinusoidal → FiLM.
 """
 
 import torch

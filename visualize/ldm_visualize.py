@@ -50,7 +50,7 @@ def main():
     args = parser.parse_args()
 
     os.makedirs(args.output, exist_ok=True)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     vis_base_path = "/root/autodl-tmp/data/vis/"
     ir_base_path = "/root/autodl-tmp/data/ir/"
@@ -84,6 +84,10 @@ def main():
     unet.load_state_dict(_clean(ckpt["unet"]))
     unet.eval()
 
+    if device.type == "cuda":
+        ir_encoder = torch.compile(ir_encoder, mode="reduce-overhead")
+        unet = torch.compile(unet, mode="reduce-overhead")
+
     diff = GaussianDiffusion(T=args.T, schedule="linear")
 
     # ---- Load inputs ----
@@ -99,21 +103,52 @@ def main():
     vis = (vis_gt.astype(np.float32) / 127.5) - 1.0
     vis = torch.from_numpy(vis).to(device).unsqueeze(0).unsqueeze(0) # [1, 1, 512, 512]
 
-    # ---- Forward pass ----
+    # ---- Forward pass 64 times and take the best ----
+    num_samples = 64
+    chunk_size = 8  # sample in chunks to manage GPU memory
+
+    best_ssim = float("inf")
+    best_recon = None
+    best_l1 = None
+    all_l1 = []
+    all_ssim = []
+
     with torch.no_grad():
         f_ir = ir_encoder(ir_img_t)
         angles_128 = F.interpolate(angles, size=(128, 128), mode="bilinear")
-        cond = torch.cat([f_ir, angles_128], dim=1)              # (1, 8, 128, 128)
-        z_0 = diff.ddim_sample_loop(unet, (1, 4, 128, 128), cond, steps=args.ddim_steps, eta=args.ddim_eta)
-        z_0 = z_0 / args.latent_scale
-        recon = vae.decode(z_0)
-        l1 = F.l1_loss(recon, vis).item()
-        ssim = ssim_loss(recon, vis).item()
+        cond_single = torch.cat([f_ir, angles_128], dim=1)  # (1, 8, 128, 128)
 
-    print(f"Validation results: L1 loss = {l1:.04f}, SSIM loss (1 - SSIM) = {ssim:.04f}")
+        for start in range(0, num_samples, chunk_size):
+            n = min(chunk_size, num_samples - start)
+            cond = cond_single.expand(n, 8, 128, 128)
+            z_0 = diff.ddim_sample_loop(unet, (n, 4, 128, 128), cond,
+                                        steps=args.ddim_steps, eta=args.ddim_eta)
+            z_0 = z_0 / args.latent_scale
+            recon_chunk = vae.decode(z_0)
 
-    output = recon.squeeze().detach().cpu().numpy()
-    output = ((output + 1.0) * 127.5).clip(0, 255) # .astype(np.uint8)
+            # Per-sample L1
+            vis_expand = vis.expand(n, -1, -1, -1)
+            l1_per_sample = F.l1_loss(recon_chunk, vis_expand, reduction="none").flatten(1).mean(dim=1)
+            # Per-sample SSIM loss
+            ssim_per_sample = torch.tensor([
+                ssim_loss(recon_chunk[i:i + 1], vis) for i in range(n)
+            ], device=device)
+
+            all_l1.extend(l1_per_sample.tolist())
+            all_ssim.extend(ssim_per_sample.tolist())
+
+            # Track best
+            best_idx = ssim_per_sample.argmin()
+            if ssim_per_sample[best_idx] < best_ssim:
+                best_ssim = ssim_per_sample[best_idx].item()
+                best_recon = recon_chunk[best_idx].clone()
+                best_l1 = l1_per_sample[best_idx].item()
+
+    print(f"Best of {num_samples} — L1 = {best_l1:.4f}, SSIM loss (1-SSIM) = {best_ssim:.4f}")
+    print(f"Mean over {num_samples} — L1 = {np.mean(all_l1):.4f}, SSIM loss = {np.mean(all_ssim):.4f}")
+
+    output = best_recon.squeeze().detach().cpu().numpy()
+    output = ((output + 1.0) * 127.5).clip(0, 255)
     plt.imsave(
         os.path.join(args.output, f"{satellite}_ldm_{timestamp}.jpg"),
         output, cmap="gray", vmin=0, vmax=255,

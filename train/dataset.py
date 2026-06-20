@@ -69,10 +69,12 @@ def _normalise_angles(arr):
 class VisDataset(Dataset):
     """Single-channel B03 visible images for VAE training."""
 
-    def __init__(self, split="train", split_ratio=0.9, data_dir="data"):
+    def __init__(self, split="train", split_ratio=0.9, data_dir="data", seed=42):
         paths = _find_files(data_dir, "vis")
         if not paths:
             raise FileNotFoundError(f"No .npy files in {data_dir}/vis/")
+        rng = np.random.RandomState(seed)
+        rng.shuffle(paths)
         n = len(paths)
         cutoff = int(n * split_ratio)
         self.paths = paths[:cutoff] if split == "train" else paths[cutoff:]
@@ -89,10 +91,12 @@ class VisDataset(Dataset):
 class IRDataset(Dataset):
     """3-channel IR stacks (B11, B13, B15) for IR encoder training."""
 
-    def __init__(self, split="train", split_ratio=0.9, data_dir="data"):
+    def __init__(self, split="train", split_ratio=0.9, data_dir="data", seed=42):
         paths = _find_files(data_dir, "ir")
         if not paths:
             raise FileNotFoundError(f"No .npy files in {data_dir}/ir/")
+        rng = np.random.RandomState(seed)
+        rng.shuffle(paths)
         n = len(paths)
         cutoff = int(n * split_ratio)
         self.paths = paths[:cutoff] if split == "train" else paths[cutoff:]
@@ -120,7 +124,7 @@ class PairedDataset(Dataset):
     latent space (resized to 128×128) alongside z_ir and z_t.
     """
 
-    def __init__(self, split="train", split_ratio=0.9, data_dir="data"):
+    def __init__(self, split="train", split_ratio=0.9, data_dir="data", seed=42):
         self.split = split
         vis_paths = _find_files(data_dir, "vis")
         ir_paths = _find_files(data_dir, "ir")
@@ -142,6 +146,8 @@ class PairedDataset(Dataset):
         common = sorted(set(vis_keys) & set(ir_keys) & set(angle_keys))
         if not common:
             raise RuntimeError("No matching VIS/IR/angles triples found")
+        rng = np.random.RandomState(seed)
+        rng.shuffle(common)
 
         n = len(common)
         cutoff = int(n * split_ratio)
