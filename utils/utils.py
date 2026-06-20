@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Download and process Himawari-8/9 Target-area satellite data for IR→VIS translation.
 
