@@ -73,8 +73,8 @@ class VisDataset(Dataset):
         paths = _find_files(data_dir, "vis")
         if not paths:
             raise FileNotFoundError(f"No .npy files in {data_dir}/vis/")
-        rng = np.random.RandomState(seed)
-        rng.shuffle(paths)
+        # rng = np.random.RandomState(seed)
+        # rng.shuffle(paths)
         n = len(paths)
         cutoff = int(n * split_ratio)
         self.paths = paths[:cutoff] if split == "train" else paths[cutoff:]
@@ -95,8 +95,8 @@ class IRDataset(Dataset):
         paths = _find_files(data_dir, "ir")
         if not paths:
             raise FileNotFoundError(f"No .npy files in {data_dir}/ir/")
-        rng = np.random.RandomState(seed)
-        rng.shuffle(paths)
+        # rng = np.random.RandomState(seed)
+        # rng.shuffle(paths)
         n = len(paths)
         cutoff = int(n * split_ratio)
         self.paths = paths[:cutoff] if split == "train" else paths[cutoff:]
@@ -146,8 +146,8 @@ class PairedDataset(Dataset):
         common = sorted(set(vis_keys) & set(ir_keys) & set(angle_keys))
         if not common:
             raise RuntimeError("No matching VIS/IR/angles triples found")
-        rng = np.random.RandomState(seed)
-        rng.shuffle(common)
+        # rng = np.random.RandomState(seed)
+        # rng.shuffle(common)
 
         n = len(common)
         cutoff = int(n * split_ratio)
